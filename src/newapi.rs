@@ -122,21 +122,63 @@ impl NewApiClient {
         Ok(value.get("data").cloned().unwrap_or(value))
     }
 
-    pub async fn create_channel(&self, payload: &Value) -> Result<i64, AppError> {
+    pub async fn create_channel(&self, name: &str, payload: &Value) -> Result<i64, AppError> {
+        self.json_request(
+            self.http
+                .post(format!("{}/api/channel/", self.base))
+                .json(&json!({
+                    "mode": "single",
+                    "channel": payload
+                })),
+            "创建渠道",
+        )
+        .await?;
+
+        // New API does not return ID in AddChannel response, look up by name
+        let channels = self.search_channels(name).await.unwrap_or_default();
+        if let Some(ch) = channels
+            .iter()
+            .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
+        {
+            if let Some(id) = ch.get("id").and_then(|id| id.as_i64()) {
+                return Ok(id);
+            }
+        }
+
+        let all = self.list_channels().await.unwrap_or_default();
+        if let Some(ch) = all
+            .iter()
+            .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
+        {
+            if let Some(id) = ch.get("id").and_then(|id| id.as_i64()) {
+                return Ok(id);
+            }
+        }
+        Err(AppError::bad("创建渠道成功但在列表中未找到新建渠道"))
+    }
+
+    pub async fn search_channels(&self, keyword: &str) -> Result<Vec<Value>, AppError> {
         let value = self
             .json_request(
                 self.http
-                    .post(format!("{}/api/channel/", self.base))
-                    .json(payload),
-                "创建渠道",
+                    .get(format!("{}/api/channel/search", self.base))
+                    .query(&[("keyword", keyword)]),
+                "搜索渠道",
             )
             .await?;
-        let id = value
-            .get("data")
-            .and_then(|d| d.get("id"))
-            .and_then(|id| id.as_i64())
-            .ok_or_else(|| AppError::bad("创建渠道成功但未返回有效 ID"))?;
-        Ok(id)
+        Ok(unwrap_rows(&value))
+    }
+
+    pub async fn update_channel_status(&self, id: i64, status: i32) -> Result<(), AppError> {
+        let _ = self
+            .json_request(
+                self.http
+                    .post(format!("{}/api/channel/{}/status", self.base, id))
+                    .json(&json!({ "status": status })),
+                "更新渠道状态",
+            )
+            .await;
+        Ok(())
     }
 
     pub async fn update_channel(&self, payload: &Value) -> Result<(), AppError> {
@@ -205,11 +247,13 @@ impl NewApiClient {
                     obj.insert("groups".into(), json!(groups));
                     obj.insert("priority".into(), json!(account.priority));
                     obj.insert("weight".into(), json!(account.weight));
-                    obj.insert("status".into(), json!(status));
+                    // New API PUT /api/channel/ strictly forbids "status" field in payload
+                    obj.remove("status");
                     obj.insert("auto_ban".into(), json!(if settings.auto_ban { 1 } else { 0 }));
                     obj.insert("tag".into(), json!(settings.managed_tag));
                 }
                 self.update_channel(&payload).await?;
+                let _ = self.update_channel_status(channel_id, status).await;
                 return Ok(channel_id);
             }
         }
@@ -226,18 +270,25 @@ impl NewApiClient {
             "groups": groups,
             "priority": account.priority,
             "weight": account.weight,
-            "status": status,
             "auto_ban": if settings.auto_ban { 1 } else { 0 },
             "tag": settings.managed_tag,
             "remark": format!("managed_by:{}", OWNER_ID),
         });
 
-        let id = self.create_channel(&create_payload).await?;
+        let id = self.create_channel(&channel_name, &create_payload).await?;
+        let _ = self.update_channel_status(id, status).await;
         Ok(id)
     }
 }
 
 fn unwrap_rows(value: &Value) -> Vec<Value> {
+    if let Some(arr) = value
+        .get("data")
+        .and_then(|v| v.get("items"))
+        .and_then(|v| v.as_array())
+    {
+        return arr.clone();
+    }
     if let Some(arr) = value.get("data").and_then(|v| v.as_array()) {
         return arr.clone();
     }
