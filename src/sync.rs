@@ -190,9 +190,12 @@ pub async fn run_sync(
             )
             .await?;
 
+            let mut active_acc = acc.clone();
+            active_acc.status = probe_res.status.clone();
+
             if let Some(ref newapi) = newapi_client {
                 match newapi
-                    .sync_account_channel(acc, &raw_key, &candidate_ids, &settings, &target_model)
+                    .sync_account_channel(&active_acc, &raw_key, &candidate_ids, &settings, &target_model)
                     .await
                 {
                     Ok(channel_id) => {
