@@ -143,22 +143,11 @@ pub async fn run_sync(
 
     let top_tier_count = std::cmp::min(3, candidate_ids.len());
 
-    // Step 2: Probe all accounts & sync channels with tiered intelligence mapping
-    let mut updated_channels = Vec::new();
-    let mut healthy_count = 0;
+    // Step 2: Probe all accounts first
+    let mut healthy_accounts = Vec::new();
+    let probe_model = candidate_ids.get(0).cloned().unwrap_or_else(|| "nvidia/nemotron-3-ultra-550b-a55b".into());
 
-    for (idx, acc) in accounts.iter().enumerate() {
-        let tier_idx = if accounts.is_empty() || top_tier_count == 0 {
-            0
-        } else {
-            (idx * top_tier_count) / accounts.len()
-        };
-        let target_model = candidate_ids
-            .get(tier_idx)
-            .cloned()
-            .unwrap_or_else(|| "nvidia/nemotron-3.5-super-vl-120b-a12b".into());
-        let tier_label = format!("第 {} 梯队 (Top {})", tier_idx + 1, tier_idx + 1);
-
+    for acc in &accounts {
         let raw_key = match crypto.decrypt(&acc.api_key) {
             Ok(k) if !k.is_empty() => k,
             _ => acc.api_key.clone(),
@@ -168,19 +157,15 @@ pub async fn run_sync(
             &run_id,
             "info",
             "probe",
-            &format!(
-                "探测账号 [{}] ({} / 优先级: {}, 权重: {}, 绑定模型: {})",
-                acc.name, tier_label, acc.priority, acc.weight, target_model
-            ),
+            &format!("探测账号 [{}] (探测模型: {})", acc.name, probe_model),
             None,
         )
         .await?;
 
-        let probe_res = tester.probe_account(acc, &raw_key, &target_model).await;
+        let probe_res = tester.probe_account(acc, &raw_key, &probe_model).await;
         db.update_account_probe(&acc.id, &probe_res.status, &probe_res.detail).await?;
 
         if probe_res.is_healthy {
-            healthy_count += 1;
             db.append_log(
                 &run_id,
                 "info",
@@ -192,21 +177,54 @@ pub async fn run_sync(
 
             let mut active_acc = acc.clone();
             active_acc.status = probe_res.status.clone();
+            healthy_accounts.push((active_acc, raw_key));
+        } else {
+            db.append_log(
+                &run_id,
+                "warn",
+                "probe",
+                &format!("账号 [{}] 探测异常: {}", acc.name, probe_res.detail),
+                None,
+            )
+            .await?;
+        }
+    }
 
-            if let Some(ref newapi) = newapi_client {
+    healthy_count = healthy_accounts.len();
+
+    // Step 3: Multi-account × Multi-tier channel sync
+    // For each tier (Priority 10, 9, 8...): sync across all healthy accounts!
+    for tier_idx in 0..top_tier_count {
+        let priority = (10 - tier_idx as i64).max(1);
+        let target_model = candidate_ids
+            .get(tier_idx)
+            .cloned()
+            .unwrap_or_else(|| "nvidia/nemotron-3.5-super-vl-120b-a12b".into());
+        let tier_label = format!("第 {} 梯队 (Top {}, 优先级 P{})", tier_idx + 1, tier_idx + 1, priority);
+
+        db.append_log(
+            &run_id,
+            "info",
+            "sync_tier",
+            &format!("开始同步 {} 模型: {}", tier_label, target_model),
+            None,
+        )
+        .await?;
+
+        if let Some(ref newapi) = newapi_client {
+            for (acc, raw_key) in &healthy_accounts {
                 match newapi
-                    .sync_account_channel(&active_acc, &raw_key, &candidate_ids, &settings, &target_model)
+                    .sync_tier_channel(acc, raw_key, &candidate_ids, &settings, tier_idx, priority, &target_model)
                     .await
                 {
                     Ok(channel_id) => {
-                        db.update_account_channel_id(&acc.id, channel_id).await?;
                         updated_channels.push(channel_id);
                         db.append_log(
                             &run_id,
                             "info",
                             "newapi",
                             &format!(
-                                "成功同步账号 [{}] 到 New API 渠道 ID {} ({} 映射: {} -> {})",
+                                "同步账号 [{}] 到渠道 #{} ({} 映射: {} -> {})",
                                 acc.name, channel_id, tier_label, settings.alias_model, target_model
                             ),
                             None,
@@ -218,31 +236,11 @@ pub async fn run_sync(
                             &run_id,
                             "error",
                             "newapi",
-                            &format!("同步账号 [{}] 到 New API 失败: {e}", acc.name),
+                            &format!("同步账号 [{}] ({}) 到 New API 失败: {e}", acc.name, tier_label),
                             None,
                         )
                         .await?;
                     }
-                }
-            }
-        } else {
-            db.append_log(
-                &run_id,
-                "warn",
-                "probe",
-                &format!("账号 [{}] 探测异常: {}", acc.name, probe_res.detail),
-                None,
-            )
-            .await?;
-
-            // If account is disabled or unhealthy, disable its New API channel
-            if let Some(ref newapi) = newapi_client {
-                if let Some(channel_id) = acc.newapi_channel_id {
-                    let mut disabled_acc = acc.clone();
-                    disabled_acc.enabled = false;
-                    let _ = newapi
-                        .sync_account_channel(&disabled_acc, &raw_key, &candidate_ids, &settings, &target_model)
-                        .await;
                 }
             }
         }

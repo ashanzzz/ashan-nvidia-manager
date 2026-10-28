@@ -192,12 +192,14 @@ impl NewApiClient {
         Ok(())
     }
 
-    pub async fn sync_account_channel(
+    pub async fn sync_tier_channel(
         &self,
         account: &NvidiaAccount,
         plaintext_key: &str,
         active_models: &[String],
         settings: &AppSettings,
+        tier_idx: usize,
+        priority: i64,
         target_model: &str,
     ) -> Result<i64, AppError> {
         let mut models = vec![settings.alias_model.clone()];
@@ -222,7 +224,19 @@ impl NewApiClient {
         }
         let group_str = groups.join(",");
 
-        let channel_name = format!("{}[{}]", settings.channel_name_prefix, account.name);
+        let short_name = if target_model.contains("550b") {
+            "550B"
+        } else if target_model.contains("120b") {
+            "120B"
+        } else if target_model.contains("30b") {
+            "30B"
+        } else if target_model.contains("11b") {
+            "11B"
+        } else {
+            "NIM"
+        };
+
+        let channel_name = format!("{}[P{}-{}][{}]", settings.channel_name_prefix, priority, short_name, account.name);
         let status = if account.enabled && account.status != "error" && account.status != "unauthorized" {
             1 // enabled
         } else {
@@ -233,10 +247,35 @@ impl NewApiClient {
         mapping.insert(&settings.alias_model, target_model);
         let model_mapping_str = serde_json::to_string(&mapping).unwrap_or_default();
 
-        if let Some(channel_id) = account.newapi_channel_id {
-            // Check if exists
-            if let Ok(mut current) = self.get_channel(channel_id).await {
-                // Merge payload
+        let status_code_mapping_str = json!({
+            "400": 500,
+            "401": 500,
+            "404": 500,
+            "413": 500,
+            "429": 500,
+            "500": 500,
+            "502": 500,
+            "503": 500
+        }).to_string();
+
+        let remark = format!("managed_by:{};acc:{};tier:{};model:{}", OWNER_ID, account.id, tier_idx + 1, target_model);
+
+        // Look up existing channel by name or tag + remark
+        let all_channels = self.list_channels().await.unwrap_or_default();
+        let matched = all_channels.iter().find(|c| {
+            if c.get("name").and_then(|n| n.as_str()) == Some(&channel_name) {
+                return true;
+            }
+            if let Some(r) = c.get("remark").and_then(|r| r.as_str()) {
+                if r.contains(&format!("acc:{}", account.id)) && r.contains(&format!("tier:{}", tier_idx + 1)) {
+                    return true;
+                }
+            }
+            false
+        });
+
+        if let Some(current) = matched {
+            if let Some(channel_id) = current.get("id").and_then(|id| id.as_i64()) {
                 let mut payload = current.clone();
                 if let Some(obj) = payload.as_object_mut() {
                     obj.insert("id".into(), json!(channel_id));
@@ -246,14 +285,16 @@ impl NewApiClient {
                     obj.insert("base_url".into(), json!(settings.nvidia_api_base.trim_end_matches("/v1")));
                     obj.insert("models".into(), json!(models_str));
                     obj.insert("model_mapping".into(), json!(model_mapping_str));
+                    obj.insert("status_code_mapping".into(), json!(status_code_mapping_str));
                     obj.insert("group".into(), json!(group_str));
                     obj.insert("groups".into(), json!(groups));
-                    obj.insert("priority".into(), json!(account.priority));
-                    obj.insert("weight".into(), json!(account.weight));
+                    obj.insert("priority".into(), json!(priority));
+                    obj.insert("weight".into(), json!(100));
                     // New API PUT /api/channel/ strictly forbids "status" field in payload
                     obj.remove("status");
                     obj.insert("auto_ban".into(), json!(if settings.auto_ban { 1 } else { 0 }));
                     obj.insert("tag".into(), json!(settings.managed_tag));
+                    obj.insert("remark".into(), json!(remark));
                 }
                 self.update_channel(&payload).await?;
                 let _ = self.update_channel_status(channel_id, status).await;
@@ -269,13 +310,14 @@ impl NewApiClient {
             "base_url": settings.nvidia_api_base.trim_end_matches("/v1"),
             "models": models_str,
             "model_mapping": model_mapping_str,
+            "status_code_mapping": status_code_mapping_str,
             "group": group_str,
             "groups": groups,
-            "priority": account.priority,
-            "weight": account.weight,
+            "priority": priority,
+            "weight": 100,
             "auto_ban": if settings.auto_ban { 1 } else { 0 },
             "tag": settings.managed_tag,
-            "remark": format!("managed_by:{}", OWNER_ID),
+            "remark": remark,
         });
 
         let id = self.create_channel(&channel_name, &create_payload).await?;
