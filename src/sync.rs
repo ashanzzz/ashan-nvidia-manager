@@ -91,6 +91,7 @@ pub async fn run_sync(
 
     // Step 1: Discover live models using first available key
     let mut live_model_ids = Vec::new();
+    let mut probe_key = String::new();
     for acc in &accounts {
         if !acc.enabled { continue; }
         let raw_key = match crypto.decrypt(&acc.api_key) {
@@ -99,18 +100,42 @@ pub async fn run_sync(
         };
         if let Ok(ids) = nvidia_client.list_models(&raw_key).await {
             live_model_ids = ids;
+            probe_key = raw_key;
             break;
         }
     }
 
-    let candidate_models = select_and_rank_models(&live_model_ids, &settings);
+    let initial_candidates = select_and_rank_models(&live_model_ids, &settings);
+
+    // Preflight candidate models to filter out models that are currently timing out or offline upstream
+    let candidate_models = if !probe_key.is_empty() && !initial_candidates.is_empty() {
+        let test_results = tester.test_candidates(&probe_key, &initial_candidates).await;
+        let responsive_ids: std::collections::HashSet<String> = test_results
+            .into_iter()
+            .filter(|(_, ok, _, _)| *ok)
+            .map(|(id, _, _, _)| id)
+            .collect();
+        let filtered: Vec<NvidiaModelItem> = initial_candidates
+            .into_iter()
+            .filter(|m| responsive_ids.contains(&m.id))
+            .collect();
+        if filtered.is_empty() {
+            // fallback if all preflights timed out
+            select_and_rank_models(&live_model_ids, &settings)
+        } else {
+            filtered
+        }
+    } else {
+        initial_candidates
+    };
+
     let candidate_ids: Vec<String> = candidate_models.iter().map(|m| m.id.clone()).collect();
 
     db.append_log(
         &run_id,
         "info",
         "catalog",
-        &format!("模型优选完成，筛选出 {} 个主力模型", candidate_models.len()),
+        &format!("模型优选完成，筛选出 {} 个健康主力模型 (按智力从高到低排序)", candidate_models.len()),
         Some(&candidate_ids.join(", ")),
     )
     .await?;

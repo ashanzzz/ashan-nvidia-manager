@@ -67,6 +67,7 @@ impl NvidiaClient {
         let resp = self
             .http
             .post(&url)
+            .timeout(std::time::Duration::from_secs(12))
             .bearer_auth(api_key)
             .json(&payload)
             .send()
