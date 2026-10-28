@@ -61,7 +61,7 @@ pub async fn run(state: AppState) {
                 let crypto = state.crypto.clone();
                 let http = state.http.clone();
                 let guard = state.sync_guard.clone();
-                if let Err(e) = run_sync(db, crypto, http, guard, "scheduled_cron").await {
+                if let Err(e) = run_sync(db, crypto, http, guard, "scheduled_cron", None).await {
                     error!("自动同步执行失败: {e}");
                 }
             }

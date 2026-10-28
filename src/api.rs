@@ -159,20 +159,21 @@ async fn save_settings(
 }
 
 async fn start_sync(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    let run_id = uuid::Uuid::new_v4().to_string();
     let db = state.db.clone();
     let crypto = state.crypto.clone();
     let http = state.http.clone();
     let sync_guard = state.sync_guard.clone();
-    let run_id = Uuid::new_v4().to_string();
     let run_id_clone = run_id.clone();
-
     tokio::spawn(async move {
-        if let Err(e) = run_sync(db, crypto, http, sync_guard, "manual_web").await {
-            tracing::error!("手动同步任务失败: {e}");
+        if let Err(e) = run_sync(db, crypto, http, sync_guard, "manual_web", Some(run_id_clone)).await {
+            tracing::error!("Sync task failed: {e}");
         }
     });
-
-    Ok(Json(json!({"status": "started", "run_id": run_id_clone})))
+    Ok(Json(json!({
+        "run_id": run_id,
+        "status": "started"
+    })))
 }
 
 async fn list_sync_runs(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {

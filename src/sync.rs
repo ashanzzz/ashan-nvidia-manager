@@ -19,13 +19,14 @@ pub async fn run_sync(
     http: reqwest::Client,
     sync_guard: Arc<Mutex<()>>,
     trigger: &str,
+    preset_run_id: Option<String>,
 ) -> Result<String, AppError> {
     let _permit = match sync_guard.try_lock() {
         Ok(guard) => guard,
         Err(_) => return Err(AppError::bad("已有同步任务正在进行中，请稍后再试")),
     };
 
-    let run_id = Uuid::new_v4().to_string();
+    let run_id = preset_run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     db.start_sync_run(&run_id, trigger).await?;
     db.append_log(&run_id, "info", "init", &format!("同步任务已启动 (触发来源: {trigger})"), None).await?;
 
