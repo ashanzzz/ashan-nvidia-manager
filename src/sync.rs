@@ -7,6 +7,7 @@ use crate::{
     crypto::Crypto,
     db::Database,
     error::AppError,
+    models::NvidiaModelItem,
     newapi::NewApiClient,
     nvidia::NvidiaClient,
     ranking::select_and_rank_models,
