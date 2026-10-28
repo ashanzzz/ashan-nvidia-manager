@@ -198,8 +198,12 @@ impl NewApiClient {
         plaintext_key: &str,
         active_models: &[String],
         settings: &AppSettings,
+        target_model: &str,
     ) -> Result<i64, AppError> {
         let mut models = vec![settings.alias_model.clone()];
+        if !models.contains(&target_model.to_string()) {
+            models.push(target_model.to_string());
+        }
         if settings.expose_upstream_models {
             for m in active_models {
                 if !models.contains(m) {
@@ -225,9 +229,8 @@ impl NewApiClient {
             2 // disabled
         };
 
-        let primary_model = active_models.first().map(|s| s.as_str()).unwrap_or("nvidia/nemotron-3.5-super-vl-120b-a12b");
         let mut mapping = std::collections::HashMap::new();
-        mapping.insert(&settings.alias_model, primary_model);
+        mapping.insert(&settings.alias_model, target_model);
         let model_mapping_str = serde_json::to_string(&mapping).unwrap_or_default();
 
         if let Some(channel_id) = account.newapi_channel_id {

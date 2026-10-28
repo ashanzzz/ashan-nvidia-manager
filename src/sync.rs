@@ -115,13 +115,24 @@ pub async fn run_sync(
     )
     .await?;
 
-    let probe_model = candidate_ids.first().cloned().unwrap_or_else(|| "nvidia/nemotron-3.5-super-vl-120b-a12b".into());
+    let top_tier_count = std::cmp::min(3, candidate_ids.len());
 
-    // Step 2: Probe all accounts & sync channels
+    // Step 2: Probe all accounts & sync channels with tiered intelligence mapping
     let mut updated_channels = Vec::new();
     let mut healthy_count = 0;
 
-    for acc in &accounts {
+    for (idx, acc) in accounts.iter().enumerate() {
+        let tier_idx = if accounts.is_empty() || top_tier_count == 0 {
+            0
+        } else {
+            (idx * top_tier_count) / accounts.len()
+        };
+        let target_model = candidate_ids
+            .get(tier_idx)
+            .cloned()
+            .unwrap_or_else(|| "nvidia/nemotron-3.5-super-vl-120b-a12b".into());
+        let tier_label = format!("第 {} 梯队 (Top {})", tier_idx + 1, tier_idx + 1);
+
         let raw_key = match crypto.decrypt(&acc.api_key) {
             Ok(k) if !k.is_empty() => k,
             _ => acc.api_key.clone(),
@@ -131,12 +142,15 @@ pub async fn run_sync(
             &run_id,
             "info",
             "probe",
-            &format!("探测账号 [{}] (优先级: {}, 权重: {})", acc.name, acc.priority, acc.weight),
+            &format!(
+                "探测账号 [{}] ({} / 优先级: {}, 权重: {}, 绑定模型: {})",
+                acc.name, tier_label, acc.priority, acc.weight, target_model
+            ),
             None,
         )
         .await?;
 
-        let probe_res = tester.probe_account(acc, &raw_key, &probe_model).await;
+        let probe_res = tester.probe_account(acc, &raw_key, &target_model).await;
         db.update_account_probe(&acc.id, &probe_res.status, &probe_res.detail).await?;
 
         if probe_res.is_healthy {
@@ -151,7 +165,10 @@ pub async fn run_sync(
             .await?;
 
             if let Some(ref newapi) = newapi_client {
-                match newapi.sync_account_channel(acc, &raw_key, &candidate_ids, &settings).await {
+                match newapi
+                    .sync_account_channel(acc, &raw_key, &candidate_ids, &settings, &target_model)
+                    .await
+                {
                     Ok(channel_id) => {
                         db.update_account_channel_id(&acc.id, channel_id).await?;
                         updated_channels.push(channel_id);
@@ -159,7 +176,10 @@ pub async fn run_sync(
                             &run_id,
                             "info",
                             "newapi",
-                            &format!("成功同步账号 [{}] 到 New API 渠道 ID {}", acc.name, channel_id),
+                            &format!(
+                                "成功同步账号 [{}] 到 New API 渠道 ID {} ({} 映射: {} -> {})",
+                                acc.name, channel_id, tier_label, settings.alias_model, target_model
+                            ),
                             None,
                         )
                         .await?;
@@ -191,7 +211,9 @@ pub async fn run_sync(
                 if let Some(channel_id) = acc.newapi_channel_id {
                     let mut disabled_acc = acc.clone();
                     disabled_acc.enabled = false;
-                    let _ = newapi.sync_account_channel(&disabled_acc, &raw_key, &candidate_ids, &settings).await;
+                    let _ = newapi
+                        .sync_account_channel(&disabled_acc, &raw_key, &candidate_ids, &settings, &target_model)
+                        .await;
                 }
             }
         }
